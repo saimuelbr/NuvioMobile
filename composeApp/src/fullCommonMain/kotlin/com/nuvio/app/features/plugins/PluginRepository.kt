@@ -3,6 +3,7 @@ package com.nuvio.app.features.plugins
 import co.touchlab.kermit.Logger
 import com.nuvio.app.core.network.SupabaseProvider
 import com.nuvio.app.features.addons.httpGetText
+import com.nuvio.app.features.plugins.engine.PluginOrchestratorProvider
 import com.nuvio.app.features.profiles.ProfileRepository
 import com.nuvio.app.features.tmdb.TmdbService
 import io.github.jan.supabase.postgrest.postgrest
@@ -98,6 +99,7 @@ actual object PluginRepository {
                 .decodeList<PluginRow>()
 
             val urls = dedupeManifestUrls(rows.map { it.url })
+
             if (urls.isEmpty() && !pulledFromServer) {
                 val localUrls = _uiState.value.repositories.map { it.manifestUrl }
                 if (localUrls.isNotEmpty()) {
@@ -308,30 +310,39 @@ actual object PluginRepository {
         )
     }
 
-    actual suspend fun executeScraper(
-        scraper: PluginScraper,
-        tmdbId: String,
-        mediaType: String,
-        season: Int?,
-        episode: Int?,
-    ): Result<List<PluginRuntimeResult>> {
-        val resolvedTmdbId = resolvePluginTmdbId(
-            tmdbId = tmdbId,
-            mediaType = mediaType,
-        )
-
-        return runCatching {
-            PluginRuntime.executePlugin(
-                code = scraper.code,
-                tmdbId = resolvedTmdbId,
-                mediaType = normalizePluginType(mediaType),
-                season = season,
-                episode = episode,
-                scraperId = scraper.id,
-                scraperSettings = emptyMap(),
-            )
-        }
+actual suspend fun executeScraper(
+    scraper: PluginScraper,
+    tmdbId: String,
+    mediaType: String,
+    season: Int?,
+    episode: Int?,
+): Result<List<PluginRuntimeResult>> {
+    if (!PluginEngineProvider.isInitialized()) {
+        // fallback
+        return Result.failure(IllegalStateException("Plugin Engine not initialized"))
     }
+
+    val resolvedTmdbId = resolvePluginTmdbId(tmdbId, mediaType)
+    
+    return try {
+        val engine = PluginEngineProvider.get()
+        kotlinx.coroutines.withTimeoutOrNull(60_000L) {
+            engine.executeScraper(
+                code = scraper.code,
+                scraperName = scraper.name,
+                params = mapOf(
+                    "tmdbId" to resolvedTmdbId,
+                    "mediaType" to normalizePluginType(mediaType),
+                    "season" to season,
+                    "episode" to episode
+                ),
+                timeoutMs = 60_000L
+            )
+        } ?: Result.failure(Exception("Scraper execution timed out"))
+    } catch (e: Exception) {
+        Result.failure(e)
+    }
+}
 
     private suspend fun resolvePluginTmdbId(
         tmdbId: String,
